@@ -1,58 +1,162 @@
+"""ByteBites ChefMate: For all your culinary needs"""
+
+#Install Dependencies
+"""Using Hugging Face's Transformers Library for pre-trained models"""
+
+!pip install -q transformers torch ipywidgets accelerate
+
+#Load Model
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
-from transformers import AutoModelForCasualLLM, AutoTokenizer
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+print("🔄 Loading model...")
 
-# 1. Initialize Model and Tokenizer
-# microsoft/DialoGPT-large is the pre-trained model name
-MODEL_NAME = "microsoft/DialoGPT-large"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+model_name = "flax-community/t5-recipe-generation"
 
-def generate_chef_response(user_input, chat_history_ids=None):
-    """Generates a conversational response using DialoGPT."""
-    
-    # Encode the new user input, adding the eos_token
-    new_user_input_ids = tokenizer.encode(user_input + tokenizer.eos_token, 
-                                          return_tensors='pt')
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    model_name,
+    dtype=torch.float16,
+    device_map="auto"
+)
 
-    # Append the new user input to the chat history
-    bot_input_ids = new_user_input_ids
-    if chat_history_ids is not None:
-        bot_input_ids = torch.cat([chat_history_ids, new_user_input_ids], dim=-1)
+tokenizer.pad_token = tokenizer.eos_token
 
-    # 2. Generate a response
-    chat_history_ids = model.generate(
-        bot_input_ids, 
-        max_length=1000,
-        pad_token_id=tokenizer.eos_token_id,
-        no_repeat_ngram_size=3,  # Prevents repetitive phrases
-        do_sample=True,          # Introduces variation in responses
-        top_k=50, 
-        top_p=0.95, 
-        temperature=0.75
-    )
-    
-    # Decode the last generated response only
-    response = tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], 
-                                skip_special_tokens=True)
-    
-    return response, chat_history_ids
 
-# 3. Main Chat Loop
-if __name__ == "__main__":
-    print("ChefBot initialized. Ask me anything culinary! (Type 'quit' to exit)")
-    
-    # Store chat history to maintain context
-    chat_history_ids = None 
-    
-    while True:
-        user_input = input("You: ")
-        
-        if user_input.lower() == 'quit':
-            print("Goodbye, and happy cooking!")
-            break
-            
-        response, chat_history_ids = generate_chef_response(user_input, chat_history_ids)
-        print(f"ChefBot: {response}")
+print(f"✅ Model loaded: {model_name}")
+
+#Chat Function
+def chat_with_bot(user_input, conversation_history):
+
+    # Build conversation context
+    prompt = ""
+    for turn in conversation_history[-6:]:  # Keep last 10 turns for context
+        if turn['role'] == 'user':
+            prompt += f"User: {turn['text']}\n"
+        else:
+            prompt += f"Assistant: {turn['text']}\n"
+
+    prompt += f"User: {user_input}\nAssistant:"
+
+    # Tokenize
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    # Generate response
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=200,
+            temperature=0.7,
+            top_p=0.9,
+            top_k=50,
+            do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.3
+        )
+
+    # Decode only the new tokens
+    response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+
+    # Clean up response
+    response = response.split("User:")[0].strip()
+    response = response.split("\n\n")[0].strip()
+
+    return response
+
+#Chat UI : Interactive
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+input_box = widgets.Text(
+    placeholder='What are your culinary needs?',
+    description='You:',
+    layout=widgets.Layout(width='80%')
+)
+send_button = widgets.Button(description='Send', button_style='primary')
+clear_button = widgets.Button(description='Clear', button_style='warning')
+quit_button = widgets.Button(description='Quit', button_style='danger')
+output = widgets.HTML(value='')
+
+conversation_history = []
+
+def render_chat():
+    html = '<div style="max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; border-radius: 5px; background-color: #f9f9f9;">'
+
+    if not conversation_history:
+        html += '<p style="color: #666; text-align: center;">Solve your culinary questions now! 👇</p>'
+
+    for turn in conversation_history:
+        role = turn['role']
+        text = turn['text'].replace('\n', '<br>')
+
+        if role == 'user':
+            html += f'''
+            <div style="margin: 10px 0; text-align: right;">
+                <span style="background-color: #007bff; color: white; padding: 10px 15px; border-radius: 18px; display: inline-block; max-width: 70%; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+                    {text}
+                </span>
+            </div>
+            '''
+        else:
+            html += f'''
+            <div style="margin: 10px 0;">
+                <span style="background-color: #ffffff; color: black; padding: 10px 15px; border-radius: 18px; display: inline-block; max-width: 70%; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border: 1px solid #e0e0e0;">
+                    {text}
+                </span>
+            </div>
+            '''
+
+    html += '</div>'
+    output.value = html
+
+def on_send_clicked(b):
+    user_message = input_box.value.strip()
+    if not user_message:
+        return
+
+    # Add user message
+    conversation_history.append({'role': 'user', 'text': user_message})
+    render_chat()
+    input_box.value = ''
+
+    # Show thinking indicator
+    conversation_history.append({'role': 'bot', 'text': '💭 Thinking...'})
+    render_chat()
+
+    try:
+        # Get bot response
+        bot_response = chat_with_bot(user_message, conversation_history[:-1])
+
+        # Remove thinking indicator and add real response
+        conversation_history.pop()
+        conversation_history.append({'role': 'bot', 'text': bot_response})
+        render_chat()
+    except Exception as e:
+        conversation_history.pop()
+        conversation_history.append({'role': 'bot', 'text': f'❌ Error: {str(e)}'})
+        render_chat()
+
+def on_clear_clicked(b):
+    conversation_history.clear()
+    render_chat()
+
+def on_quit_clicked(b):
+    clear_output(wait=True)
+    print("ChefMate closed. Re-run this cell to restart.")
+
+send_button.on_click(on_send_clicked)
+clear_button.on_click(on_clear_clicked)
+quit_button.on_click(on_quit_clicked)
+
+ui = widgets.VBox([
+    widgets.HTML(f'<h3>🤖 Generative AI Chatbot</h3><p style="color: #666;">Using: {model_name}</p>'),
+    output,
+    input_box,
+    widgets.HBox([send_button, clear_button, quit_button])
+])
+
+display(ui)
+render_chat()
+print("💬 ChefMate ready!")
