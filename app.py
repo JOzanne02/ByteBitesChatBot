@@ -1,53 +1,48 @@
-from flask import Flask, request, jsonify
+# app.py
+
+import streamlit as st
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
-import os
 
-# --- Model Loading (Keep this outside the request handling for speed) ---
-app = Flask(__name__)
+# --- 1. Model Loading (Cached for speed) ---
 
-# Set up model and tokenizer globally
-model = None
-tokenizer = None
-model_name = "flax-community/t5-recipe-generation"
-
+# Use Streamlit's caching mechanism to load the model only once
+@st.cache_resource
 def load_model():
-    """Loads the model and tokenizer."""
-    global model, tokenizer
-    print("🔄 Loading model...")
+    model_name = "flax-community/t5-recipe-generation"
+    
+    # Hugging Face Spaces typically runs on CPU/GPU hardware, 
+    # but we will rely on the default device mapping (device_map="auto") 
+    # for best performance in the cloud environment.
+    
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Check if a GPU is available, otherwise use CPU
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSeq2SeqLM.from_pretrained(
         model_name,
-        dtype=torch.float32 if device == "cpu" else torch.float16, # Use float32 on CPU
-        device_map=device
+        dtype=torch.float16,
+        device_map="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
-    print(f"✅ Model loaded: {model_name} on device: {device}")
+    return model, tokenizer
 
-# --- Chat Function (Your original logic, adapted slightly) ---
+model, tokenizer = load_model()
+
+
+# --- 2. Chat Function ---
 def chat_with_bot(user_input, conversation_history):
-    global model, tokenizer
-    # ... [Paste your existing chat_with_bot function here] ...
-    # (Make sure to remove the `model.device` and use the actual device from the loaded model if device_map="auto" is used, or pass the device)
-    # Since we use device_map="auto", model will manage it, so the original logic should largely work.
-    # Just ensure `inputs = {k: v.to(model.device) for k, v in inputs.items()}` is correct.
-
+    # This function is exactly your original logic, adapted slightly for the structure
+    
     # Build conversation context
     prompt = ""
     for turn in conversation_history[-6:]: 
-        if turn['role'] == 'user':
-            prompt += f"User: {turn['text']}\n"
-        else:
-            prompt += f"Assistant: {turn['text']}\n"
+        # Note: conversation_history uses the Streamlit format: {"role": "user"/"assistant", "content": "text"}
+        role_label = "User" if turn['role'] == 'user' else "Assistant"
+        prompt += f"{role_label}: {turn['content']}\n"
 
     prompt += f"User: {user_input}\nAssistant:"
 
     # Tokenize
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-
-    # Move inputs to the correct device
+    # Move inputs to the correct device (model.device ensures it's on the correct hardware)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     # Generate response
@@ -64,45 +59,45 @@ def chat_with_bot(user_input, conversation_history):
             repetition_penalty=1.3
         )
 
-    # Decode only the new tokens
+    # Decode
     response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-
-    # Clean up response
     response = response.split("User:")[0].strip()
     response = response.split("\n\n")[0].strip()
-
+    
     return response
 
+# --- 3. Streamlit Interface ---
 
-# --- Flask Routes ---
+st.set_page_config(page_title="ByteBites ChefMate", page_icon="🍲")
+st.title("🍲 ByteBites ChefMate AI")
+st.caption("Powered by flax-community/t5-recipe-generation")
 
-@app.route('/')
-def index():
-    """Serve the frontend HTML file."""
-    # For simplicity, we'll serve the chat via a single route.
-    return app.send_static_file('index.html') # Serve the frontend file (see step 2)
+# Initialize chat history (using Streamlit's session_state)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-@app.route('/api/chat', methods=['POST'])
-def handle_chat():
-    """API endpoint to get the bot's response."""
-    if not model or not tokenizer:
-        return jsonify({'error': 'Model not loaded.'}), 503
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    data = request.get_json()
-    user_input = data.get('user_input', '').strip()
-    history = data.get('history', []) # Expects a list of {'role': 'user'/'bot', 'text': '...'}
-
-    if not user_input:
-        return jsonify({'error': 'No input provided'}), 400
-
-    try:
-        bot_response = chat_with_bot(user_input, history)
-        return jsonify({'response': bot_response})
-    except Exception as e:
-        app.logger.error(f"Chat error: {e}")
-        return jsonify({'error': f'An internal error occurred: {str(e)}'}), 500
-
-if __name__ == '__main__':
-    load_model() # Load the model once when the server starts
-    # Host on http://127.0.0.1:5000/
-    app.run(debug=True)
+# Get user input
+if prompt := st.chat_input("What culinary adventure should we embark on?"):
+    
+    # 1. Display and save user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # 2. Get and display assistant response
+    with st.chat_message("assistant"):
+        with st.spinner("💭 ChefMate is thinking up a recipe..."):
+            
+            # Use the history (excluding the current prompt) for context in the model call
+            history_for_context = st.session_state.messages[:-1] 
+            response = chat_with_bot(prompt, history_for_context)
+            
+            st.markdown(response)
+    
+    # 3. Save assistant response
+    st.session_state.messages.append({"role": "assistant", "content": response})
