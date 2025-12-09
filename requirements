@@ -1,4 +1,5 @@
-torch
+# requirements.txt
+streamlit
 transformers
-
-pip install -r requirements.txt
+torch
+accelerate
